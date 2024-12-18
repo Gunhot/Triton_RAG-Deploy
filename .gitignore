@@ -1,0 +1,7 @@
+# 내부 파일 제외
+multilingual-e5-large-instruct/*
+!multilingual-e5-large-instruct/.gitkeep
+
+tensorrtllm_backend/*
+!tensorrtllm_backend/.gitkeep
+
