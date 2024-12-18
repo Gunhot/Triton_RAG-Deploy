@@ -1,0 +1,86 @@
+실행 방법
+1. ../mivlus_test 폴더에서 
+docker compose up -d
+를 통해 milvus 실행
+
+2. 아무 폴더에서
+docker start my-redis
+로 레디스 실행
+
+3. 현재 폴더에서
+python3 /tensorrtllm_backend/scripts/launch_triton_server.py --world_size=1 --model_repo=/triton_model_repo
+trtion inference Server 실행
+
+
+
+준비 방법
+
+
+1. triton inference Server tensorrt_llm_backend 설치
+git clone -b v0.11.0 https://github.com/triton-inference-server/tensorrtllm_backend.git ./tensorrtllm_backend
+cd ./tensorrtllm_backend
+git submodule update --init --recursive
+git lfs install
+git lfs pull
+cd ..
+git clone https://huggingface.co/intfloat/multilingual-e5-large-instruct
+
+2. Docker 실행
+docker run --rm -it --net host --shm-size=2g \
+    --ulimit memlock=-1 --ulimit stack=67108864 --gpus all \
+    -v $(pwd)/tensorrtllm_backend:/tensorrtllm_backend \
+    -v $(pwd)/engines:/engines \
+    -v $(pwd)/triton_model_repo:/triton_model_repo \
+    -v $(pwd)/multilingual-e5-large-instruct:/multi-e5 \
+    gunhot_triton
+
+3. LLM 다운로드
+# Convert weights from HF Transformers to TensorRT-LLM checkpoint with int8 quantization
+cd /tensorrtllm_backend/tensorrt_llm/examples/llama
+rm -rf gunhot && git clone https://huggingface.co/MLP-KTLim/llama-3-Korean-Bllossom-8B gunhot
+
+4. 양자화 진행
+python3 convert_checkpoint.py --model_dir gunhot \
+    --dtype float16 \
+    --tp_size 1 \
+    --use_weight_only \
+    --weight_only_precision int8 \
+    --output_dir ./c-model/gunhot/int8/1-gpu
+
+5. 엔진 생성
+trtllm-build --checkpoint_dir ./c-model/gunhot/int8/1-gpu \
+    --gpt_attention_plugin auto \
+    --gemm_plugin auto \
+    --remove_input_padding enable \
+    --paged_kv_cache enable \
+    --output_dir /engines/llama/int8/1-gpu
+
+6. trtion model repo 생성
+cp -r /tensorrtllm_backend/all_models/inflight_batcher_llm/* /triton_model_repo/
+
+7. trtion model repo 내부 파일 생성
+주의: 이거 실행하면 기존에 작성한 파일(/triton_model_repo/preprocessing/1/model.py, /triton_model_repo/postprocessing/1/model.py)들 날라감!
+실행할거면 백업을 먼저 진행해야함.
+# 양자화된 엔진 경로 설정
+ENGINE_DIR=/engines/llama/int8/1-gpu
+TOKENIZER_DIR=/tensorrtllm_backend/tensorrt_llm/examples/llama/gunhot
+MODEL_FOLDER=/triton_model_repo
+TRITON_MAX_BATCH_SIZE=4  # 성능에 따라 조정 가능
+INSTANCE_COUNT=1
+MAX_QUEUE_DELAY_MS=0
+MAX_QUEUE_SIZE=0
+FILL_TEMPLATE_SCRIPT=/tensorrtllm_backend/tools/fill_template.py
+DECOUPLED_MODE=false  # 필요에 따라 조정 가능
+
+python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/ensemble/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE}
+python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/preprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},preprocessing_instance_count:${INSTANCE_COUNT}
+python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm/config.pbtxt triton_backend:tensorrtllm,triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},engine_dir:${ENGINE_DIR},max_queue_delay_microseconds:${MAX_QUEUE_DELAY_MS},batching_strategy:inflight_fused_batching,max_queue_size:${MAX_QUEUE_SIZE}
+python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/postprocessing/config.pbtxt tokenizer_dir:${TOKENIZER_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},postprocessing_instance_count:${INSTANCE_COUNT},max_queue_size:${MAX_QUEUE_SIZE}
+python3 ${FILL_TEMPLATE_SCRIPT} -i ${MODEL_FOLDER}/tensorrt_llm_bls/config.pbtxt triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},bls_instance_count:${INSTANCE_COUNT}
+
+8. 서버실행
+python3 /tensorrtllm_backend/scripts/launch_triton_server.py --world_size=1 --model_repo=/triton_model_repo
+
+curl -X POST http://localhost:8000/v2/models/ensemble/generate -d \
+  '{"text_input": "What is machine learning?", "max_tokens": 50, "bad_words": "", "stop_words": ""}'
+

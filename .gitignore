@@ -1,7 +1,10 @@
-# 내부 파일 제외
-multilingual-e5-large-instruct/*
-!multilingual-e5-large-instruct/.gitkeep
+# 내부 파일은 제외하고 폴더 이름만 유지
+engines/*
+!engines/.gitkeep
 
 tensorrtllm_backend/*
 !tensorrtllm_backend/.gitkeep
+
+multilingual-e5-large-instruct/*
+!multilingual-e5-large-instruct/.gitkeep
 
